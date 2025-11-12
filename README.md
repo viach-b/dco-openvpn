@@ -1,210 +1,184 @@
-# OpenVPN for Docker
+# OpenVPN with DCO (Docker)
 
-[![Build Status](https://travis-ci.org/kylemanna/docker-openvpn.svg)](https://travis-ci.org/kylemanna/docker-openvpn)
-[![Docker Stars](https://img.shields.io/docker/stars/kylemanna/openvpn.svg)](https://hub.docker.com/r/kylemanna/openvpn/)
-[![Docker Pulls](https://img.shields.io/docker/pulls/kylemanna/openvpn.svg)](https://hub.docker.com/r/kylemanna/openvpn/)
-[![ImageLayers](https://images.microbadger.com/badges/image/kylemanna/openvpn.svg)](https://microbadger.com/#/images/kylemanna/openvpn)
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fkylemanna%2Fdocker-openvpn.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fkylemanna%2Fdocker-openvpn?ref=badge_shield)
+This project is a fork of `kylemanna/docker-openvpn`, modified to run on a **Debian** base. Its primary purpose is to provide support for OpenVPN **Data Channel Offload (DCO)** for significant performance improvements.
 
+This guide covers how to set up the host system and run the server.
 
-OpenVPN server in a Docker container complete with an EasyRSA PKI CA.
+## 1\. Host System Setup (DCO)
 
-Extensively tested on [Digital Ocean $5/mo node](http://bit.ly/1C7cKr3) and has
-a corresponding [Digital Ocean Community Tutorial](http://bit.ly/1AGUZkq).
+To use DCO, the host machine's kernel must have the `ovpn_dco_v2` module loaded. On most common distributions (like Ubuntu 22.04), this module is **not** included by default, even with HWE kernels.
 
-#### Upstream Links
+The correct way to install it is by using the official OpenVPN repository to install the DKMS (Dynamic Kernel Module Support) package.
 
-* Docker Registry @ [kylemanna/openvpn](https://hub.docker.com/r/kylemanna/openvpn/)
-* GitHub @ [kylemanna/docker-openvpn](https://github.com/kylemanna/docker-openvpn)
+```bash
+# 1. Add OpenVPN GPG key
+sudo apt update
+sudo apt install apt-transport-https gnupg lsb-release wget
+wget -O - https://packages.openvpn.net/packages-repo.gpg | sudo gpg --dearmor | sudo tee /usr/share/keyrings/openvpn.gpg > /dev/null
 
-## Quick Start
+# 2. Add the OpenVPN 3 repository (which contains the DKMS package)
+echo "deb [signed-by=/usr/share/keyrings/openvpn.gpg] https://packages.openvpn.net/openvpn3/debian $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/openvpn3.list
 
-* Pick a name for the `$OVPN_DATA` data volume container. It's recommended to
-  use the `ovpn-data-` prefix to operate seamlessly with the reference systemd
-  service.  Users are encourage to replace `example` with a descriptive name of
-  their choosing.
+# 3. Install the DCO DKMS module
+sudo apt update
+sudo apt install openvpn-dco-dkms
+```
 
-      OVPN_DATA="ovpn-data-example"
+-----
 
-* Initialize the `$OVPN_DATA` container that will hold the configuration files
-  and certificates.  The container will prompt for a passphrase to protect the
-  private key used by the newly generated certificate authority.
+### How to Verify Host Setup
 
-      docker volume create --name $OVPN_DATA
-      docker run -v $OVPN_DATA:/etc/openvpn --rm kylemanna/openvpn ovpn_genconfig -u udp://VPN.SERVERNAME.COM
-      docker run -v $OVPN_DATA:/etc/openvpn --rm -it kylemanna/openvpn ovpn_initpki
+After installation, the module should be available.
 
-* Start OpenVPN server process
+1.  **Load the module** (it should load automatically on boot, but this confirms it works):
 
-      docker run -v $OVPN_DATA:/etc/openvpn -d -p 1194:1194/udp --cap-add=NET_ADMIN kylemanna/openvpn
+    ```bash
+    sudo modprobe ovpn_dco_v2
+    ```
 
-* Generate a client certificate without a passphrase
+2.  **Check if it's loaded** in the kernel:
 
-      docker run -v $OVPN_DATA:/etc/openvpn --rm -it kylemanna/openvpn easyrsa build-client-full CLIENTNAME nopass
+    ```bash
+    lsmod | grep dco
+    ```
 
-* Retrieve the client configuration with embedded certificates
+      * **Expected Output:** You should see `ovpn_dco_v2`.
 
-      docker run -v $OVPN_DATA:/etc/openvpn --rm kylemanna/openvpn ovpn_getclient CLIENTNAME > CLIENTNAME.ovpn
+3.  **Check the kernel log** (`dmesg`) for the module's initialization message:
 
-## Next Steps
+    ```bash
+    dmesg | grep -i dco
+    ```
 
-### More Reading
+      * **Expected Output:** You should see a line like: `OpenVPN data channel offload (ovpn-dco) ...`
 
-Miscellaneous write-ups for advanced configurations are available in the
-[docs](docs) folder.
+If these commands succeed, your host is ready for DCO.
 
-### Systemd Init Scripts
+## 2\. Running the Server
 
-A `systemd` init script is available to manage the OpenVPN container.  It will
-start the container on system boot, restart the container if it exits
-unexpectedly, and pull updates from Docker Hub to keep itself up to date.
+Once the host is prepared, you must build the image and then run the container.
 
-Please refer to the [systemd documentation](docs/systemd.md) to learn more.
+### One-Time Setup
 
-### Docker Compose
+First, you must generate the configuration and PKI. This image's `ovpn_genconfig` script has been modified to **automatically** create a DCO-compatible config (`topology subnet` and `allow-compression no`).
 
-If you prefer to use `docker-compose` please refer to the [documentation](docs/docker-compose.md).
+```bash
+# 1. Build your custom image
+docker build -t viach-b/openvpn-dco .
 
-## Debugging Tips
+# 2. Create a persistent volume for config and keys
+docker volume create openvpn-data
 
-* Create an environment variable with the name DEBUG and value of 1 to enable debug output (using "docker -e").
+# 3. Generate the DCO-compatible configuration
+# (Note: Do NOT add any extra DCO flags; the script handles it)
+docker run -v openvpn-data:/etc/openvpn --rm viach-b/openvpn-dco \
+    ovpn_genconfig -u udp://vpn.yourdomain.com
 
-        docker run -v $OVPN_DATA:/etc/openvpn -p 1194:1194/udp --cap-add=NET_ADMIN -e DEBUG=1 kylemanna/openvpn
+# 4. Initialize the Public Key Infrastructure (PKI)
+# You will be asked to create and confirm a CA password.
+docker run -v openvpn-data:/etc/openvpn --rm -it viach-b/openvpn-dco \
+    ovpn_initpki
+```
+**Note** on the interactive ovpn_initpki step:
 
-* Test using a client that has openvpn installed correctly
+This command is interactive and requires your input to create the Certificate Authority (CA). You will be prompted for the following:
 
-        $ openvpn --config CLIENTNAME.ovpn
+Enter New CA Key Passphrase: This is the most important step. Invent a strong password for your CA and press Enter.
 
-* Run through a barrage of debugging checks on the client if things don't just work
+Re-Enter / Verifying: You will be asked to re-type this password immediately to confirm it.
 
-        $ ping 8.8.8.8    # checks connectivity without touching name resolution
-        $ dig google.com  # won't use the search directives in resolv.conf
-        $ nslookup google.com # will use search
+Common Name...: You will be asked for a Common Name. Simply press Enter to accept the default (Easy-RSA CA).
 
-* Consider setting up a [systemd service](/docs/systemd.md) for automatic
-  start-up at boot time and restart in the event the OpenVPN daemon or Docker
-  crashes.
+Confirm request details: The script will show you the server certificate details. You must type yes and press Enter to approve it.
 
-## How Does It Work?
+Enter pass phrase for...: You will be asked for your CA password two more times (to sign the server certificate and again to generate the CRL).
 
-Initialize the volume container using the `kylemanna/openvpn` image with the
-included scripts to automatically generate:
+Once all prompts are complete, the PKI will be successfully initialized.
 
-- Diffie-Hellman parameters
-- a private key
-- a self-certificate matching the private key for the OpenVPN server
-- an EasyRSA CA key and certificate
-- a TLS auth key from HMAC security
+### Start the Server
 
-The OpenVPN server is started with the default run cmd of `ovpn_run`
+This command runs the server in detached (`-d`) mode.
 
-The configuration is located in `/etc/openvpn`, and the Dockerfile
-declares that directory as a volume. It means that you can start another
-container with the `-v` argument, and access the configuration.
-The volume also holds the PKI keys and certs so that it could be backed up.
-
-To generate a client certificate, `kylemanna/openvpn` uses EasyRSA via the
-`easyrsa` command in the container's path.  The `EASYRSA_*` environmental
-variables place the PKI CA under `/etc/openvpn/pki`.
-
-Conveniently, `kylemanna/openvpn` comes with a script called `ovpn_getclient`,
-which dumps an inline OpenVPN client configuration file.  This single file can
-then be given to a client for access to the VPN.
-
-To enable Two Factor Authentication for clients (a.k.a. OTP) see [this document](/docs/otp.md).
-
-## OpenVPN Details
-
-We use `tun` mode, because it works on the widest range of devices.
-`tap` mode, for instance, does not work on Android, except if the device
-is rooted.
-
-The topology used is `net30`, because it works on the widest range of OS.
-`p2p`, for instance, does not work on Windows.
-
-The UDP server uses`192.168.255.0/24` for dynamic clients by default.
-
-The client profile specifies `redirect-gateway def1`, meaning that after
-establishing the VPN connection, all traffic will go through the VPN.
-This might cause problems if you use local DNS recursors which are not
-directly reachable, since you will try to reach them through the VPN
-and they might not answer to you. If that happens, use public DNS
-resolvers like those of Google (8.8.4.4 and 8.8.8.8) or OpenDNS
-(208.67.222.222 and 208.67.220.220).
-
-
-## Security Discussion
-
-The Docker container runs its own EasyRSA PKI Certificate Authority.  This was
-chosen as a good way to compromise on security and convenience.  The container
-runs under the assumption that the OpenVPN container is running on a secure
-host, that is to say that an adversary does not have access to the PKI files
-under `/etc/openvpn/pki`.  This is a fairly reasonable compromise because if an
-adversary had access to these files, the adversary could manipulate the
-function of the OpenVPN server itself (sniff packets, create a new PKI CA, MITM
-packets, etc).
-
-* The certificate authority key is kept in the container by default for
-  simplicity.  It's highly recommended to secure the CA key with some
-  passphrase to protect against a filesystem compromise.  A more secure system
-  would put the EasyRSA PKI CA on an offline system (can use the same Docker
-  image and the script [`ovpn_copy_server_files`](/docs/paranoid.md) to accomplish this).
-* It would be impossible for an adversary to sign bad or forged certificates
-  without first cracking the key's passphase should the adversary have root
-  access to the filesystem.
-* The EasyRSA `build-client-full` command will generate and leave keys on the
-  server, again possible to compromise and steal the keys.  The keys generated
-  need to be signed by the CA which the user hopefully configured with a passphrase
-  as described above.
-* Assuming the rest of the Docker container's filesystem is secure, TLS + PKI
-  security should prevent any malicious host from using the VPN.
-
-
-## Benefits of Running Inside a Docker Container
-
-### The Entire Daemon and Dependencies are in the Docker Image
-
-This means that it will function correctly (after Docker itself is setup) on
-all distributions Linux distributions such as: Ubuntu, Arch, Debian, Fedora,
-etc.  Furthermore, an old stable server can run a bleeding edge OpenVPN server
-without having to install/muck with library dependencies (i.e. run latest
-OpenVPN with latest OpenSSL on Ubuntu 12.04 LTS).
-
-### It Doesn't Stomp All Over the Server's Filesystem
-
-Everything for the Docker container is contained in two images: the ephemeral
-run time image (kylemanna/openvpn) and the `$OVPN_DATA` data volume. To remove
-it, remove the corresponding containers, `$OVPN_DATA` data volume and Docker
-image and it's completely removed.  This also makes it easier to run multiple
-servers since each lives in the bubble of the container (of course multiple IPs
-or separate ports are needed to communicate with the world).
-
-### Some (arguable) Security Benefits
-
-At the simplest level compromising the container may prevent additional
-compromise of the server.  There are many arguments surrounding this, but the
-take away is that it certainly makes it more difficult to break out of the
-container.  People are actively working on Linux containers to make this more
-of a guarantee in the future.
-
-## Differences from jpetazzo/dockvpn
-
-* No longer uses serveconfig to distribute the configuration via https
-* Proper PKI support integrated into image
-* OpenVPN config files, PKI keys and certs are stored on a storage
-  volume for re-use across containers
-* Addition of tls-auth for HMAC security
-
-## Originally Tested On
-
-* Docker hosts:
-  * server a [Digital Ocean](https://www.digitalocean.com/?refcode=d19f7fe88c94) Droplet with 512 MB RAM running Ubuntu 14.04
-* Clients
-  * Android App OpenVPN Connect 1.1.14 (built 56)
-     * OpenVPN core 3.0 android armv7a thumb2 32-bit
-  * OS X Mavericks with Tunnelblick 3.4beta26 (build 3828) using openvpn-2.3.4
-  * ArchLinux OpenVPN pkg 2.3.4-1
-
-
-## License
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fkylemanna%2Fdocker-openvpn.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Fkylemanna%2Fdocker-openvpn?ref=badge_large)
+```bash
+docker run -d \
+    -v openvpn-data:/etc/openvpn \
+    -p 1194:1194/udp \
+    --name openvpn-dco-server \
+    --cap-add=NET_ADMIN \
+    --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+    --sysctl net.ipv6.conf.default.forwarding=1 \
+    --sysctl net.ipv6.conf.all.forwarding=1 \
+    viach-b/openvpn-dco
+```
+
+**Note:** The `--cap-add=NET_ADMIN` flag is **mandatory**. It gives the container permission to interact with the kernel's DCO module.
+
+-----
+
+### How to Verify the Server is Running with DCO
+
+There are two checks to perform:
+
+1.  **Check that the container is running:**
+
+    ```bash
+    docker ps
+    ```
+
+      * **Expected Output:** You should see `openvpn-dco-server` with a status of `Up ...`.
+
+2.  **Check the logs for the DCO confirmation messages:**
+
+    ```bash
+    docker logs openvpn-dco-server
+    ```
+
+      * **Expected Output:** Look for these specific lines, which confirm DCO is active. You should *not* see any warnings about compression or topology.
+
+    <!-- end list -->
+
+    ```text
+    ...
+    2025-11-11 10:24:48 OpenVPN 2.6.15 x86_64-pc-linux-gnu ... [DCO]
+    ...
+    2025-11-11 10:24:48 net_iface_new: add tun0 type ovpn-dco
+    2025-11-11 10:24:48 DCO device tun0 opened
+    ...
+    2025-11-11 10:24:48 Initialization Sequence Completed
+    ```
+
+If you see **`DCO device tun0 opened`** (and *not* `TUN/TAP device tun0 opened`), your server is successfully running with Data Channel Offload.
+
+## Available Scripts
+
+This image uses the original `kylemanna` scripts, adapted to find the Debian `easyrsa` package.
+
+* `ovpn_run`
+    The main entrypoint. This script sets up networking (iptables, tun) and starts the OpenVPN process.
+
+* `ovpn_genconfig`
+    Generates the initial `openvpn.conf` server configuration file. This version is modified to be **DCO-compatible by default** (uses `topology subnet` and `allow-compression no`).
+
+* `ovpn_initpki`
+    Initializes the Public Key Infrastructure (PKI). It creates the Certificate Authority (CA), generates server keys/certificates, and creates DH parameters.
+
+* `ovpn_getclient`
+    Generates a unified `.ovpn` configuration file for a specific client, combining the configuration and keys.
+
+* `ovpn_revokeclient`
+    Revokes a client's certificate. This adds the client to the Certificate Revocation List (CRL), preventing them from connecting.
+
+* `ovpn_listclients`
+    Lists all generated client certificates, their validity status (VALID, EXPIRED, REVOKED), and expiration dates.
+
+* `ovpn_getclient_all`
+    A helper script that loops and exports `.ovpn` files (in both combined and separated formats) for *all* known clients.
+
+* `ovpn_otp_user`
+    Adds a new user for Google Authenticator (OTP/2FA). This only works if the server was configured with the `-2` flag in `ovpn_genconfig`.
+
+* `ovpn_copy_server_files`
+    Copies all necessary server files (keys, certs, config) to a target directory, often used for backups or clustering.
+
+* `ovpn_status`
+    Tails the OpenVPN status log (`/tmp/openvpn-status.log`), showing current connections in real-time.
